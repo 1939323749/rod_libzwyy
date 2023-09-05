@@ -93,6 +93,9 @@ func getCookieAndToken() {
 	proxy.Verbose = true
 	proxy.OnRequest().DoFunc(
 		func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+			if r.URL.Host != "libzwyy.jlu.edu.cn" {
+				return nil, nil
+			}
 			if r.Header.Get("Cookie") != "" && r.Header.Get("Token") != "" {
 				loginInfo = LoginInfo{
 					Cookie: r.Header.Get("Cookie"),
