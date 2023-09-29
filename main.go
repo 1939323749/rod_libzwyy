@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -28,11 +28,12 @@ type service struct {
 	loginInfoChan chan struct{}
 	wg            *sync.WaitGroup
 	browser       *rod.Browser
+	logger        *slog.Logger
 }
 
 var defaultConfig = Config{
 	ProxyPort: 8000,
-	Listen:    "0.0.0.0:1234",
+	Listen:    "127.0.0.1:1234",
 	Cron:      "*/30 6-21 * * *",
 	UA:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.62",
 }
@@ -57,7 +58,8 @@ func main() {
 	studentCardId = os.Getenv("STUDENT_CARD_ID")
 	pwd = os.Getenv("STUDENT_CARD_ID_PASSWORD")
 	if studentCardId == "" || pwd == "" {
-		log.Fatalf("[ERROR] STUDENT_CARD_ID or STUDENT_CARD_ID_PASSWORD is empty, please set environment variables\n")
+		slog.Error("[ERROR] STUDENT_CARD_ID or STUDENT_CARD_ID_PASSWORD is empty, please set environment variables\n")
+		os.Exit(1)
 	}
 
 	l := launcher.New()
@@ -69,19 +71,22 @@ func main() {
 		loginInfoChan: make(chan struct{}),
 		wg:            &sync.WaitGroup{},
 		browser:       rod.New().ControlURL(controlURL).MustConnect(),
+		logger:        slog.New(slog.NewJSONHandler(os.Stdout, nil)),
 	}
-	s.wg.Add(2)
+	s.wg.Add(1)
 	go s.getCookieAndToken()
 	go s.startProxy()
-	s.wg.Wait()
+	s.logger.Info("starting server")
 	go s.startServer()
+	s.wg.Wait()
 
 	cron := cron.New()
 	cron.AddFunc("*/5 6-21 * * *", func() {
-		s.wg.Add(1)
+		s.logger.Info("refreshing cookie and token")
 		s.getCookieAndToken()
 	})
 	cron.Start()
+	s.logger.Info("cron started")
 
 	select {}
 }
@@ -96,6 +101,7 @@ func (s *service) startServer() {
 				Message: "error",
 			})
 			fmt.Fprint(w, string(res))
+			s.logger.Error("error: %v", err)
 			return
 		}
 		if s.loginInfo.Cookie == "" || s.loginInfo.Token == "" {
@@ -105,11 +111,13 @@ func (s *service) startServer() {
 				Message: "Cookie or Token is empty",
 			})
 			fmt.Fprintf(w, string(res))
+			s.logger.Error("error: %v", err)
 			return
 		}
 		fmt.Fprint(w, string(res))
 	})
-	http.ListenAndServe(defaultConfig.Listen, nil)
+	go http.ListenAndServe(defaultConfig.Listen, nil)
+	s.logger.Info("server start at %s", defaultConfig.Listen)
 }
 
 func (s *service) startProxy() {
@@ -128,14 +136,17 @@ func (s *service) startProxy() {
 					Cookie: r.Header.Get("Cookie"),
 					Token:  r.Header.Get("Token"),
 				}
+				s.logger.Info("loginInfo: %v", s.loginInfo)
 				s.loginInfoChan <- struct{}{}
 			}
 			return r, nil
 		})
 	go http.ListenAndServe(fmt.Sprintf(":%d", defaultConfig.ProxyPort), proxy)
+	s.logger.Info("proxy start at %d", defaultConfig.ProxyPort)
 }
 
 func (s *service) getCookieAndToken() {
+	s.wg.Wait()
 	page := s.browser.MustPage("http://libzwyy.jlu.edu.cn/#/ic/home")
 	page.SetUserAgent(&proto.NetworkSetUserAgentOverride{UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.62"})
 	page.MustElement("#app > div.container > div.login-wrapp > div > div.content > form > div:nth-child(1) > div > div > input").MustInput(studentCardId)
@@ -143,9 +154,8 @@ func (s *service) getCookieAndToken() {
 	page.MustElement("#app > div.container > div.login-wrapp > div > div.content > form > div:nth-child(2) > div > div > input").MustClick().MustInput(pwd)
 	page.MustElement("#app > div.container > div.login-wrapp > div > div.content > form > div:nth-child(2) > div > div > input").MustMoveMouseOut()
 	page.MustElement("#app > div.container > div.login-wrapp > div > div.content > form > div:nth-child(3) > div > button").MustClick()
+	s.logger.Info("login success")
 	<-s.loginInfoChan
 	page.MustClose()
-	s.wg.Done()
-	s.wg.Wait()
 	return
 }
